@@ -64,6 +64,63 @@ def load_sub_images(image_path, num_splits=4):
     return batch_array
 
 
+def load_and_stack_views(left_path, right_path, back_path):
+    """
+    Loads three images, applies the transform pipeline to each,
+    and stacks them into (3, C, H, W).
+    """
+    image_transform = T.Compose([
+        T.Resize((args.size, args.size)),
+        T.ToTensor(),
+        T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    # 1. Load images using PIL
+    # Ensuring RGB mode is critical for the Normalize step to work on 3 channels
+    left_img = Image.open(left_path).convert('RGB')
+    right_img = Image.open(right_path).convert('RGB')
+    back_img = Image.open(back_path).convert('RGB')
+
+    # 2. Apply your existing self.image_transform to each PIL image
+    # This Resize -> ToTensor -> Normalize sequence now gets the PIL input it wants
+    left_tensor = image_transform(left_img)
+    right_tensor = image_transform(right_img)
+    back_tensor = image_transform(back_img)
+
+    # 3. Stack along a new 0th dimension
+    # Resulting shape: (3, C, H, W)
+    stacked_views = torch.stack([left_tensor, right_tensor, back_tensor],
+                                dim=0)
+
+    return stacked_views
+
+
+def load_and_stack_ndarrays(left_path, right_path, back_path):
+    """
+    Loads three image paths, converts them to ndarrays, 
+    and stacks them into shape (3, C, H, W).
+    """
+    paths = [left_path, right_path, back_path]
+    images = []
+
+    for path in paths:
+        # Load image and ensure it's RGB (3 channels)
+        img = Image.open(path).convert('RGB')
+
+        # Convert to ndarray (H, W, C)
+        img_array = np.array(img)
+
+        # Change layout from (H, W, C) to (C, H, W)
+        # transpose(2, 0, 1) moves the channel axis to the front
+        img_array = img_array.transpose(2, 0, 1)
+
+        images.append(img_array)
+
+    # Stack into a single array: (3, C, H, W)
+    stacked_views = np.stack(images, axis=0)
+
+    return stacked_views
+
+
 def i2i_new(model,
             image_size,
             prompt,
@@ -130,11 +187,31 @@ def i2i_new(model,
         torch_array = load_sub_images(
             "/home/yulong/pvbg-thesis/ImageDream/extern/ImageDream/astronaut_pixel_dream_old.png",
             num_splits=4)
+
+        #torch_array = load_and_stack_views("./assets/spot_left.png",
+        #                                   "./assets/spot_right.png",
+        #                                   "./assets/spot_back.png")
+
+        #torch_array = transform(torch_array).to(device)
         torch_array = torch_array * 2.0 - 1.0  # to [-1, 1]
+
         #img = (torch_array[3].clamp(0,1)*255).byte()
         #img = img.permute(1,2,0).cpu().numpy()
         #Image.fromarray(img).show()
         #exit()
+        #encode_array = model.get_first_stage_encoding(
+        #   (model.encode_first_stage(torch_array.to(device))))
+        
+        #x0 = torch.cat((encode_array[0].unsqueeze(0), ip_img,
+        #                encode_array[1].unsqueeze(0),
+        #                encode_array[2].unsqueeze(0), ip_img),
+        #               dim=0)
+        
+        #x0 = torch.cat((ip_img, encode_array[0].unsqueeze(0),
+        #                encode_array[1].unsqueeze(0),
+        #                encode_array[2].unsqueeze(0), ip_img),
+        #               dim=0)
+        
         x0 = torch.cat((ip_img,
                         model.get_first_stage_encoding(
                             (model.encode_first_stage(
@@ -142,7 +219,7 @@ def i2i_new(model,
                        dim=0)
 
         #ddpm forward:
-        eta = 1.0
+        eta = 0.9
         sampler.make_schedule(50, ddim_eta=eta)
         wt, zs, wts = inversion_forward_process(
             model,
@@ -169,16 +246,15 @@ def i2i_new(model,
         #img = (torch_array[1].clamp(0, 1) * 255).byte()
         #img = img.permute(1, 2, 0).cpu().numpy()
         #Image.fromarray(img).show()
-        
-        xt, _ , img= inversion_reverse_process(
-            model,
-            xT=wt,
-            etas=eta,
-            c_=c_,
-            uc_=uc_,
-            cfg_scales = [scale],
-            zs=zs,
-            sampler=sampler)
+
+        xt, _, img = inversion_reverse_process(model,
+                                               xT=wt,
+                                               etas=eta,
+                                               c_=c_,
+                                               uc_=uc_,
+                                               cfg_scales=[scale],
+                                               zs=zs,
+                                               sampler=sampler)
 
         #xt, _ = sampler.sample_ddpm(
         #    S=step,
@@ -260,7 +336,6 @@ def i2i(model,
             uc_["ip_img"] = torch.zeros_like(ip_img)
 
         shape = [4, image_size // 8, image_size // 8]
-        from IPython import embed; embed(); exit()
         samples_ddim, _ = sampler.sample(
             S=step,
             conditioning=c_,
@@ -406,8 +481,9 @@ if __name__ == "__main__":
     image_dream.model.to(torch.float32)
     #image_dream.model.first_stage_model.to(torch.float32)
 
-    images = image_dream.diffuse(t, ip, n_test=1)
+    images = image_dream.diffuse(t, ip, n_test=3)
 
     name = os.path.basename(args.image).split(".")[0]
     images = np.concatenate(images, 0)
     Image.fromarray(images).save(f"{name}_{args.mode}_dream.png")
+    print(f"saved image: {name}_{args.mode}_dream.png")
