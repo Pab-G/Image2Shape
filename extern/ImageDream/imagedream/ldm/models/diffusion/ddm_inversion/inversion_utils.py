@@ -48,7 +48,8 @@ def sample_xts_from_x0(model,
     """
     Samples from P(x_1:T|x_0)
     """
-    sqet_alpha_bar = sampler.sqrt_alphas_cumprod
+    #torch.manual_seed(42)
+    sqrt_alpha_bar = sampler.sqrt_alphas_cumprod
     sqrt_one_minus_alpha_bar = sampler.sqrt_one_minus_alphas_cumprod
     timesteps = torch.from_numpy(
         sampler.ddim_timesteps[::-1].copy()).long().to(model.device)
@@ -58,7 +59,7 @@ def sample_xts_from_x0(model,
     xts[0] = x0
     for t in reversed(timesteps):
         idx = num_inference_steps - t_to_idx[int(t)]
-        xts[idx] = x0 * sqet_alpha_bar[t] + torch.randn_like(
+        xts[idx] = x0 * sqrt_alpha_bar[t] + torch.randn_like(
             x0) * sqrt_one_minus_alpha_bar[t]
 
     return xts
@@ -122,7 +123,6 @@ def get_variance(model, timestep, sampler):
                 beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
     return variance
 
-
 def inversion_forward_process(model,
                               x0,
                               etas=None,
@@ -173,7 +173,7 @@ def inversion_forward_process(model,
         with torch.no_grad():
             out_cond = model.apply_model(x_noisy=xt, t=t_tensor, cond=c_)
             out_uncond = model.apply_model(x_noisy=xt, t=t_tensor, cond=uc_)
-            out = out_uncond + 5.0 * (out_cond - out_uncond)
+            out = out_uncond + cfg_scale * (out_cond - out_uncond)
         noise_pred = out
 
         # Actual x_{t-1} where we must land
@@ -211,9 +211,12 @@ def inversion_forward_process(model,
         xts[idx] = xtm1
 
     if not zs is None:
-        zs[0] = torch.zeros_like(zs[0])
-
-    return xt, zs, xts
+        #zs[0] = torch.zeros_like(zs[0])
+        pass
+    xt_final = xt.detach()
+    zs_final = zs.detach()       # Keep on GPU but cut the graph
+    xts_final = [x.detach() for x in xts]
+    return xt_final, zs_final, xts_final
 
 
 def reverse_step(model,
@@ -258,7 +261,7 @@ def reverse_step(model,
                                          device=model.device)
             print("Warning: sampling random noise for inversion reverse process")
             exit()
-        sigma_z = eta * std_dev_t * variance_noise
+        sigma_z = std_dev_t * variance_noise
         prev_sample = prev_sample + sigma_z
 
     return prev_sample

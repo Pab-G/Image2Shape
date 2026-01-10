@@ -183,58 +183,58 @@ def i2i_new(model,
             uc_["ip_img"] = torch.zeros_like(ip_img)
 
         shape = [4, image_size // 8, image_size // 8]
+        #torch_array = load_sub_images(
+        #    "/home/yulong/pvbg-thesis/ImageDream/extern/ImageDream/astronaut_pixel_dream_old.png",
+        #    num_splits=4)
 
-        torch_array = load_sub_images(
-            "/home/yulong/pvbg-thesis/ImageDream/extern/ImageDream/astronaut_pixel_dream_old.png",
-            num_splits=4)
+        torch_array = load_and_stack_views("./assets/spot/spot_left.png",
+                                           "./assets/spot/spot_right.png",
+                                           "./assets/spot/spot_back.png",
+                                           )
 
-        #torch_array = load_and_stack_views("./assets/spot_left.png",
-        #                                   "./assets/spot_right.png",
-        #                                   "./assets/spot_back.png")
-
-        #torch_array = transform(torch_array).to(device)
-        torch_array = torch_array * 2.0 - 1.0  # to [-1, 1]
-
+        #torch_array = torch_array * 2.0 - 1.0  # to [-1, 1]
+        
         #img = (torch_array[3].clamp(0,1)*255).byte()
         #img = img.permute(1,2,0).cpu().numpy()
         #Image.fromarray(img).show()
         #exit()
-        #encode_array = model.get_first_stage_encoding(
-        #   (model.encode_first_stage(torch_array.to(device))))
+        encode_array = model.get_first_stage_encoding(
+           (model.encode_first_stage(torch_array.to(device))))
         
-        #x0 = torch.cat((encode_array[0].unsqueeze(0), ip_img,
-        #                encode_array[1].unsqueeze(0),
-        #                encode_array[2].unsqueeze(0), ip_img),
-        #               dim=0)
-        
-        #x0 = torch.cat((ip_img, encode_array[0].unsqueeze(0),
-        #                encode_array[1].unsqueeze(0),
-        #                encode_array[2].unsqueeze(0), ip_img),
-        #               dim=0)
-        
-        x0 = torch.cat((ip_img,
-                        model.get_first_stage_encoding(
-                            (model.encode_first_stage(
-                                torch_array[1:].to(device)))), ip_img),
+        """x0 = torch.cat((ip_img, encode_array[1].unsqueeze(0),
+                        encode_array[2].unsqueeze(0),
+                        encode_array[0].unsqueeze(0), ip_img),
+                       dim=0)"""
+        x0 = torch.cat((encode_array[1].unsqueeze(0),ip_img,
+                        encode_array[0].unsqueeze(0),
+                        encode_array[2].unsqueeze(0), ip_img),
                        dim=0)
+        
+        #x0 = torch.cat((ip_img,
+        #                model.get_first_stage_encoding(
+        #                    (model.encode_first_stage(
+        #                        torch_array[1:].to(device)))), ip_img),
+        #               dim=0)
 
         #ddpm forward:
-        eta = 0.9
+        eta = 1.0
         sampler.make_schedule(50, ddim_eta=eta)
-        wt, zs, wts = inversion_forward_process(
-            model,
-            x0=x0,
-            etas=eta,
-            prompt=ip_embed,
-            cfg_scale=eta,
-            prog_bar=True,
-            num_inference_steps=step,
-            timesteps=sampler.ddim_timesteps[::-1],
-            shape=shape,
-            sampler=sampler,
-            c_=c_,
-            uc_=uc_,
-        )
+        with torch.no_grad():
+            # try not getting wts and just get wt
+            wt, zs, wts = inversion_forward_process(
+                model,
+                x0=x0,
+                etas=eta,
+                prompt=ip_embed,
+                cfg_scale=scale,
+                prog_bar=True,
+                num_inference_steps=step,
+                timesteps=sampler.ddim_timesteps[::-1],
+                shape=shape,
+                sampler=sampler,
+                c_=c_,
+                uc_=uc_,
+            )
         #from IPython import embed; embed(); exit()
         #latent_to_image(model, wts, steps=5, sampler=sampler)
 
@@ -246,15 +246,15 @@ def i2i_new(model,
         #img = (torch_array[1].clamp(0, 1) * 255).byte()
         #img = img.permute(1, 2, 0).cpu().numpy()
         #Image.fromarray(img).show()
-
-        xt, _, img = inversion_reverse_process(model,
-                                               xT=wt,
-                                               etas=eta,
-                                               c_=c_,
-                                               uc_=uc_,
-                                               cfg_scales=[scale],
-                                               zs=zs,
-                                               sampler=sampler)
+        with torch.no_grad():
+            xt, _, img = inversion_reverse_process(model,
+                                                xT=wt,
+                                                etas=eta,
+                                                c_=c_,
+                                                uc_=uc_,
+                                                cfg_scales=[scale],
+                                                zs=zs,
+                                                sampler=sampler)
 
         #xt, _ = sampler.sample_ddpm(
         #    S=step,
@@ -414,7 +414,7 @@ class ImageDreamDiffusion():
                           self.sampler,
                           ip=ip,
                           step=50,
-                          scale=5,
+                          scale=5.0,
                           batch_size=self.batch_size,
                           ddim_eta=0.0,
                           dtype=self.dtype,
