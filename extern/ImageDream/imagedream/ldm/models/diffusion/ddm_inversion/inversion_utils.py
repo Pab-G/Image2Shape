@@ -59,6 +59,9 @@ def sample_xts_from_x0(model,
     xts[0] = x0
     for t in reversed(timesteps):
         idx = num_inference_steps - t_to_idx[int(t)]
+        # Generate noise for one image and repeat for all in the batch
+        #shared_noise = torch.randn(
+        #    (1, *x0.shape[1:]), device=x0.device).repeat(x0.shape[0], 1, 1, 1)
         xts[idx] = x0 * sqrt_alpha_bar[t] + torch.randn_like(
             x0) * sqrt_one_minus_alpha_bar[t]
 
@@ -123,6 +126,7 @@ def get_variance(model, timestep, sampler):
                 beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
     return variance
 
+
 def inversion_forward_process(model,
                               x0,
                               etas=None,
@@ -137,7 +141,6 @@ def inversion_forward_process(model,
                               c_=None,
                               uc_=None,
                               seed=42):
-    #generator = torch.Generator(device=x0.device).manual_seed(seed)
     variance_noise_shape = (num_inference_steps, 5, shape[0], shape[1],
                             shape[2])
 
@@ -149,23 +152,38 @@ def inversion_forward_process(model,
         etas = [etas] * num_inference_steps
 
     # Noisy latents for each timestep
-    # NOTE: This gives all the four views the same noise.. probably not ideal.
     xts = sample_xts_from_x0(model,
                              x0,
                              num_inference_steps=num_inference_steps,
                              sampler=sampler,
                              shape=shape)
-
+    # Compute zs
     alpha_bar = sampler.alphas_cumprod
     zs = torch.zeros(size=variance_noise_shape, device=model.device)
     t_to_idx = {int(v): k for k, v in enumerate(timesteps)}
     xt = x0
     op = tqdm(timesteps) if prog_bar else timesteps
-    batch = 5  #hardcoded for now
+    batch = 5
+
     for t in op:
         idx = num_inference_steps - t_to_idx[int(t)] - 1
         t_tensor = torch.full((batch, ), t, device=xt.device, dtype=torch.long)
-        
+
+        # -----------------------------------------------------------------
+        # Define some akin to ImageDream
+        sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+        sqrt_one_minus_at = torch.full((batch, 1, 1, 1),
+                                       sqrt_one_minus_alphas[idx],
+                                       device=xt.device)
+        alphas = sampler.ddim_alphas
+        alphas_prev = sampler.ddim_alphas_prev
+        sigmas = sampler.ddim_sigmas
+        a_t = torch.full((batch, 1, 1, 1), alphas[idx], device=xt.device)
+        a_prev = torch.full((batch, 1, 1, 1),
+                            alphas_prev[idx],
+                            device=xt.device)
+        sigma_t = torch.full((batch, 1, 1, 1), sigmas[idx], device=xt.device)
+        # -----------------------------------------------------------------
 
         # Predict noise residual
         if not eta_is_zero:
@@ -180,8 +198,8 @@ def inversion_forward_process(model,
         xtm1 = xts[idx]
 
         # compute predicted x0 given current xt
-        pred_original_sample = (
-            xt - (1 - alpha_bar[t])**0.5 * noise_pred) / alpha_bar[t]**0.5
+        pred_original_sample = (xt -
+                                sqrt_one_minus_at * noise_pred) / a_t.sqrt()
 
         # calculate t-1
         prev_timestep = t - sampler.ddpm_num_timesteps // len(
@@ -191,32 +209,33 @@ def inversion_forward_process(model,
         alpha_prod_t_prev = sampler.alphas_cumprod[
             prev_timestep] if prev_timestep >= 0 else sampler.alphas_cumprod[0]
 
-        # get variance schedule for t (sigma_t^2)
-        #variance = get_variance(model, t, sampler)
-
         # direction pointing to x_t
-        pred_sample_direction = (1 - alpha_prod_t_prev -
-                                 (sampler.ddim_sigmas[idx])**2)**(
-                                     0.5) * noise_pred
+        dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * noise_pred
+
         # mean of x_{t-1}
-        mu_xt = alpha_prod_t_prev**(
-            0.5) * pred_original_sample + pred_sample_direction
+        mu_xt = alpha_prod_t_prev**(0.5) * pred_original_sample + dir_xt
 
         # get noise trajcetory
-        z = (xtm1 - mu_xt) / (sampler.ddim_sigmas[idx])
+        z = (xtm1 - mu_xt) / sigma_t
+
         zs[idx] = z
 
         # correction to avoid numerical precision issues
-        xtm1 = mu_xt + (sampler.ddim_sigmas[idx]) * z
+        xtm1 = mu_xt + sigma_t * z
         xts[idx] = xtm1
 
+    # NOTE: Test whether its better with or without using this:
     if not zs is None:
-        #zs[0] = torch.zeros_like(zs[0])
-        pass
+        zs[0] = torch.zeros_like(zs[0])
+
+    # NOTE: The conditioning view should be same at every timestep: but maybe have a look what infulence it has if we noise it too?
+    xts[:, 4] = xts[0, 4]
+    zs[:, 4, :, :, :] *= 0.0  # no noise-correction for conditioning view
+    # If there are some memory issues maybe try this:
     xt_final = xt.detach()
-    zs_final = zs.detach()       # Keep on GPU but cut the graph
+    zs_final = zs.detach()
     xts_final = [x.detach() for x in xts]
-    return xt_final, zs_final, xts_final
+    return xt, zs, xts
 
 
 def reverse_step(model,
@@ -224,47 +243,46 @@ def reverse_step(model,
                  timestep,
                  sample,
                  eta=0,
-                 variance_noise=None, sampler=None, idx=None):
-    #from IPython import embed; embed(); exit()
-    # 1. get previous step value (=t-1)
+                 variance_noise=None,
+                 sampler=None,
+                 idx=None):
+    batch = 5
+    sqrt_one_minus_alphas = sampler.ddim_sqrt_one_minus_alphas
+    sqrt_one_minus_at = torch.full((batch, 1, 1, 1),
+                                   sqrt_one_minus_alphas[idx],
+                                   device=model.device)
+    alphas = sampler.ddim_alphas
+    alphas_prev = sampler.ddim_alphas_prev
+    sigmas = sampler.ddim_sigmas
+    a_t = torch.full((batch, 1, 1, 1), alphas[idx], device=model.device)
+    a_prev = torch.full((batch, 1, 1, 1),
+                        alphas_prev[idx],
+                        device=model.device)
+    sigma_t = torch.full((batch, 1, 1, 1), sigmas[idx], device=model.device)
+    pred_original_sample_2 = (sample -
+                              sqrt_one_minus_at * model_output) / a_t**(0.5)
+
     prev_timestep = timestep - sampler.ddpm_num_timesteps // len(
         sampler.ddim_timesteps)
-    # 2. compute alphas, betas
-    alpha_prod_t = sampler.alphas_cumprod[timestep]
+
+    dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * model_output
+
     alpha_prod_t_prev = sampler.alphas_cumprod[
         prev_timestep] if prev_timestep >= 0 else sampler.alphas_cumprod[0]
-    beta_prod_t = 1 - alpha_prod_t
-    # 3. compute predicted original sample from predicted noise also called
-    # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-    pred_original_sample = (sample - beta_prod_t**
-                            (0.5) * model_output) / alpha_prod_t**(0.5)
-    # 5. compute variance: "sigma_t(η)" -> see formula (16)
-    # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
-    # variance = self.scheduler._get_variance(timestep, prev_timestep)
 
-    #variance = get_variance(model, timestep)  # here we defo lose some precision
-    variance = sampler.ddim_sigmas[idx]**2
-    std_dev_t = eta * variance**(0.5)
-    # Take care of asymetric reverse process (asyrp)
-    model_output_direction = model_output
-    # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-    # pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * model_output_direction
-    pred_sample_direction = (1 - alpha_prod_t_prev -
-                             eta * variance)**(0.5) * model_output_direction
-    # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-    prev_sample = alpha_prod_t_prev**(
-        0.5) * pred_original_sample + pred_sample_direction
-    # 8. Add noice if eta > 0
+    mu_xt = alpha_prod_t_prev**(0.5) * pred_original_sample_2 + dir_xt
+
     if eta > 0:
         if variance_noise is None:
             variance_noise = torch.randn(model_output.shape,
                                          device=model.device)
-            print("Warning: sampling random noise for inversion reverse process")
+            print(
+                "Warning: sampling random noise for inversion reverse process")
             exit()
-        sigma_z = std_dev_t * variance_noise
-        prev_sample = prev_sample + sigma_z
+        sigma_z = sigma_t * variance_noise
+        mu_xt = mu_xt + sigma_z
 
-    return prev_sample
+    return mu_xt
 
 
 def inversion_reverse_process(model,
@@ -278,8 +296,8 @@ def inversion_reverse_process(model,
                               controller=None,
                               asyrp=False,
                               sampler=None):
-    
-    batch_size = 5 
+
+    batch_size = 5
     if etas is None: etas = 0
     if type(etas) in [int, float]:
         etas = [etas] * len(sampler.ddim_timesteps)
@@ -287,18 +305,21 @@ def inversion_reverse_process(model,
     # Timesteps that we are sampling 1, 21, 41, ... depending on num_inference_steps
     timesteps = torch.tensor(sampler.ddim_timesteps).to(model.device)
     xt = xT
-    ts = torch.flip(timesteps[-zs.shape[0]:], dims=[0])
-    op = tqdm(
-       ts) if prog_bar else ts
+
+    ts = torch.flip(timesteps[:zs.shape[0]], dims=[0])
+    op = tqdm(ts) if prog_bar else ts
 
     t_to_idx = {int(v): k for k, v in enumerate(ts)}
     imgs = []
     for t in op:
         # t are the timesteps from last to first e.g. 981, 961, 941, ... depending on num_inference_steps
+        idx = len(sampler.ddim_timesteps) - t_to_idx[int(t)] - (
+            len(sampler.ddim_timesteps) - zs.shape[0]) - 1
+        t_tensor = torch.full((batch_size, ),
+                              t,
+                              device=xt.device,
+                              dtype=torch.long)
 
-        idx =  len(sampler.ddim_timesteps)  - t_to_idx[int(t)] - (len(sampler.ddim_timesteps) - zs.shape[0]) - 1
-        t_tensor = torch.full((batch_size, ), t, device=xt.device, dtype=torch.long) 
-        
         # Unconditional embedding
         with torch.no_grad():
             uncond_out = model.apply_model(x_noisy=xt, t=t_tensor, cond=uc_)
@@ -309,10 +330,9 @@ def inversion_reverse_process(model,
 
         # Current noise residual
         z = zs[idx] if not zs is None else None
-        
+
         # Current noise prediction by model
-        noise_pred = uncond_out + cfg_scales[0] * (
-            cond_out - uncond_out)
+        noise_pred = uncond_out + cfg_scales[0] * (cond_out - uncond_out)
 
         # Compute less noisy image and set x_t -> x_t-1
         xt = reverse_step(model,
@@ -320,7 +340,9 @@ def inversion_reverse_process(model,
                           t,
                           xt,
                           eta=etas[idx],
-                          variance_noise=z, sampler=sampler, idx=idx)
+                          variance_noise=z,
+                          sampler=sampler,
+                          idx=idx)
         if controller is not None:
             xt = controller.step_callback(xt)
         imgs.append(xt)

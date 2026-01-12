@@ -1,7 +1,9 @@
 import os
 import sys
 import argparse
-from PIL import Image
+from unittest import skip
+from PIL import Image, ImageDraw, ImageFont
+
 import numpy as np
 from IPython.display import display
 from omegaconf import OmegaConf
@@ -12,113 +14,111 @@ from imagedream.ldm.util import (instantiate_from_config, set_seed,
                                  add_random_background)
 from imagedream.ldm.models.diffusion.ddim import DDIMSampler
 from imagedream.ldm.models.diffusion.ddm_inversion.inversion_utils import inversion_forward_process, inversion_reverse_process
+from imagedream.ldm.models.diffusion.ddm_inversion.ptp_classes import AttentionStore, show_cross_attention
+from imagedream.ldm.models.diffusion.ddm_inversion.ptp_utils import register_attention_control
 from imagedream.model_zoo import build_model
 from torchvision import transforms as T
 
-
-def latent_to_image(model, latent, steps=10, sampler=None):
-
-    imgs = []
-    step_size = max(1, latent.shape[0] // steps)
-    with torch.inference_mode():
-        indices = list(range(0, latent.shape[0], step_size))
-        if indices[-1] != latent.shape[0] - 1:
-            indices.append(latent.shape[0] - 1)
-
-        for i in indices:
-            z = latent[i:i + 1]
-            z = latent[i, 3].unsqueeze(0)
-            x_rec = model.decode_first_stage(z)
-            x_rec = torch.clamp((x_rec + 1.0) / 2.0, min=0.0, max=1.0)
-            x_rec = 255.0 * x_rec.permute(0, 2, 3, 1).cpu().numpy()
-            imgs.append(x_rec.astype(np.uint8)[0])
-
-    from PIL import Image
-    img_strip = np.concatenate(imgs, axis=1)
-    #Image.fromarray(img_strip).show()
-    Image.fromarray(img_strip).save(
-        "/home/yulong/pvbg-thesis/ImageDream/extern/ImageDream/Ivisualisation.png"
-    )
-    print("saved image")
+import open_clip
+# Some visualization utilities from ChatGPT:
 
 
-def load_sub_images(image_path, num_splits=4):
-    # 1. Load the full concatenated image
-    # PIL loads as (Width, Height)
-    full_image = Image.open(image_path)
-
-    # 2. Convert to PyTorch Tensor
-    # transforms.ToTensor() converts PIL image to (C, H, W) and scales to [0.0, 1.0]
-    to_tensor = T.ToTensor()
-    tensor_image = to_tensor(full_image)
-
-    # 3. Split the tensor along the width dimension
-    # Format is (C, H, W), so Width is dimension 2
-    # This reverses: np.concatenate(img[:4], 1)
-    sub_images = torch.chunk(tensor_image, chunks=num_splits, dim=2)
-
-    # 4. Stack them into a single batch tensor
-    # Final shape will be: (4, C, H, W)
-    batch_array = torch.stack(sub_images)
-
-    return batch_array
-
-
-def load_and_stack_views(left_path, right_path, back_path):
+def visualize_noising_trajectory(model, wts, num_views=5, num_steps=50):
     """
-    Loads three images, applies the transform pipeline to each,
-    and stacks them into (3, C, H, W).
+    wts: List of tensors [step0, step1, ..., stepT]
+    num_views: 5 (Front, Right, Back, Left, Conditioning)
     """
-    image_transform = T.Compose([
+    # 1. Select 5 equidistant indices: x0, ~x12, ~x25, ~x37, xT
+    indices = [
+        0, num_steps // 4, num_steps // 2, (3 * num_steps) // 4, num_steps
+    ]
+
+    view_rows = []
+
+    with torch.no_grad():
+        for v in range(num_views):
+            step_images = []
+            for idx in indices:
+                # Extract the specific view's latent at the specific step
+                # wts[idx] shape is [batch, channels, h, w] -> [5, 4, 64, 64]
+                latent = wts[idx][v:v + 1]
+
+                # 2. Decode latent to image
+                # ImageDream/Stable Diffusion VAE scaling factor is usually 0.18215
+                img_tensor = model.decode_first_stage(latent)
+
+                # 3. Post-process to PIL
+                img = (img_tensor / 2 + 0.5).clamp(0, 1)
+                img = img.cpu().permute(0, 2, 3, 1).numpy()
+                img = (img[0] * 255).astype(np.uint8)
+                step_images.append(Image.fromarray(img))
+
+            # Concatenate the 5 steps horizontally for this view
+            view_row = np.hstack([np.asarray(i) for i in step_images])
+            view_rows.append(view_row)
+
+    # 4. Stack all view rows vertically
+    full_grid = np.vstack(view_rows)
+    return Image.fromarray(full_grid)
+
+
+def save_tensor_views(tensor, save_path="views_debug.png", labels=None):
+    """
+    tensor: (N, C, H, W) in range [-1, 1]
+    labels: List of strings for each view (e.g., ["Left", "Right", "Back"])
+    """
+    # 1. Denormalize: [-1, 1] -> [0, 1]
+    grid_tensor = (tensor.detach().cpu() * 0.5) + 0.5
+    grid_tensor = torch.clamp(grid_tensor, 0, 1)
+
+    # 2. Convert to list of PIL images to add text
+    pil_images = []
+    for i in range(grid_tensor.shape[0]):
+        # Convert single tensor to PIL
+        img_np = (grid_tensor[i].permute(1, 2, 0).numpy() * 255).astype(
+            np.uint8)
+        img_pil = Image.fromarray(img_np)
+
+        # Add Label if provided
+        if labels and i < len(labels):
+            draw = ImageDraw.Draw(img_pil)
+            # Use default font (or path to a .ttf if you have one)
+            draw.text((10, 10), f"View {i}: {labels[i]}", fill=(255, 255, 0))
+
+        pil_images.append(img_pil)
+
+    # 3. Concatenate horizontally
+    widths, heights = zip(*(i.size for i in pil_images))
+    total_width = sum(widths)
+    max_height = max(heights)
+
+    new_im = Image.new('RGB', (total_width, max_height))
+    x_offset = 0
+    for im in pil_images:
+        new_im.paste(im, (x_offset, 0))
+        x_offset += im.size[0]
+
+    new_im.save(save_path)
+    print(f"Visualization saved to: {save_path}")
+
+
+def load_and_stack_views(paths, device="cuda"):
+    """
+    paths: List of strings [path_to_right, path_to_back, path_to_left]
+    """
+    transform = T.Compose([
         T.Resize((args.size, args.size)),
         T.ToTensor(),
         T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-    # 1. Load images using PIL
-    # Ensuring RGB mode is critical for the Normalize step to work on 3 channels
-    left_img = Image.open(left_path).convert('RGB')
-    right_img = Image.open(right_path).convert('RGB')
-    back_img = Image.open(back_path).convert('RGB')
 
-    # 2. Apply your existing self.image_transform to each PIL image
-    # This Resize -> ToTensor -> Normalize sequence now gets the PIL input it wants
-    left_tensor = image_transform(left_img)
-    right_tensor = image_transform(right_img)
-    back_tensor = image_transform(back_img)
+    tensors = []
+    for p in paths:
+        img = Image.open(p)
+        img = add_random_background(img)
+        tensors.append(transform(img))
 
-    # 3. Stack along a new 0th dimension
-    # Resulting shape: (3, C, H, W)
-    stacked_views = torch.stack([left_tensor, right_tensor, back_tensor],
-                                dim=0)
-
-    return stacked_views
-
-
-def load_and_stack_ndarrays(left_path, right_path, back_path):
-    """
-    Loads three image paths, converts them to ndarrays, 
-    and stacks them into shape (3, C, H, W).
-    """
-    paths = [left_path, right_path, back_path]
-    images = []
-
-    for path in paths:
-        # Load image and ensure it's RGB (3 channels)
-        img = Image.open(path).convert('RGB')
-
-        # Convert to ndarray (H, W, C)
-        img_array = np.array(img)
-
-        # Change layout from (H, W, C) to (C, H, W)
-        # transpose(2, 0, 1) moves the channel axis to the front
-        img_array = img_array.transpose(2, 0, 1)
-
-        images.append(img_array)
-
-    # Stack into a single array: (3, C, H, W)
-    stacked_views = np.stack(images, axis=0)
-
-    return stacked_views
+    return torch.stack(tensors, dim=0).to(device)
 
 
 def i2i_new(model,
@@ -127,9 +127,13 @@ def i2i_new(model,
             uc,
             sampler,
             ip=None,
-            step=20,
-            scale=5.0,
+            step=100,
             batch_size=8,
+            skip=36,
+            cfg_src=3.5,
+            cfg_tar=15.0,
+            xa=0.6,
+            sa=0.2,
             ddim_eta=0.0,
             dtype=torch.float32,
             device="cuda",
@@ -155,8 +159,15 @@ def i2i_new(model,
         num_frames (int, optional): _description_. Defaults to 4
         pixel_control: whether to use pixel conditioning. Defaults to False.
     """
+
+    # Original prompt
+    prompt_src = ['a cow, 3d asset']
+    prompt_src = model.get_learned_conditioning(prompt_src).to(device).repeat(
+        batch_size, 1, 1)
+
     if type(prompt) != list:
         prompt = [prompt]
+
     with torch.no_grad(), torch.autocast(device_type=device, dtype=dtype):
         c = model.get_learned_conditioning(prompt).to(device)
         c_ = {"context": c.repeat(batch_size, 1, 1)}
@@ -172,7 +183,6 @@ def i2i_new(model,
             ip_ = ip_embed.repeat(batch_size, 1, 1)
             c_["ip"] = ip_
             uc_["ip"] = torch.zeros_like(ip_)
-
         if pixel_control:
             assert camera is not None
             ip = transform(ip).to(device)
@@ -183,50 +193,36 @@ def i2i_new(model,
             uc_["ip_img"] = torch.zeros_like(ip_img)
 
         shape = [4, image_size // 8, image_size // 8]
-        #torch_array = load_sub_images(
-        #    "/home/yulong/pvbg-thesis/ImageDream/extern/ImageDream/astronaut_pixel_dream_old.png",
-        #    num_splits=4)
+        torch_array = load_and_stack_views([
+            "./assets/spot/spot_left.png", "./assets/spot/spot_right.png",
+            "./assets/spot/spot_back.png"
+        ],
+                                           device=device)
 
-        torch_array = load_and_stack_views("./assets/spot/spot_left.png",
-                                           "./assets/spot/spot_right.png",
-                                           "./assets/spot/spot_back.png",
-                                           )
+        # Visualisation:
+        #save_tensor_views(torch_array,
+        #                  save_path="./diffusion_out/debug/check_input_views.png",
+        #                  labels=["Left", "Right", "Back"])
 
-        #torch_array = torch_array * 2.0 - 1.0  # to [-1, 1]
-        
-        #img = (torch_array[3].clamp(0,1)*255).byte()
-        #img = img.permute(1,2,0).cpu().numpy()
-        #Image.fromarray(img).show()
-        #exit()
         encode_array = model.get_first_stage_encoding(
-           (model.encode_first_stage(torch_array.to(device))))
-        
-        """x0 = torch.cat((ip_img, encode_array[1].unsqueeze(0),
-                        encode_array[2].unsqueeze(0),
-                        encode_array[0].unsqueeze(0), ip_img),
-                       dim=0)"""
-        x0 = torch.cat((encode_array[1].unsqueeze(0),ip_img,
+            (model.encode_first_stage(torch_array.to(device))))
+
+        # Tricky because views might need to be arranged for now try out:
+        x0 = torch.cat((encode_array[1].unsqueeze(0), ip_img,
                         encode_array[0].unsqueeze(0),
                         encode_array[2].unsqueeze(0), ip_img),
                        dim=0)
-        
-        #x0 = torch.cat((ip_img,
-        #                model.get_first_stage_encoding(
-        #                    (model.encode_first_stage(
-        #                        torch_array[1:].to(device)))), ip_img),
-        #               dim=0)
 
-        #ddpm forward:
-        eta = 1.0
-        sampler.make_schedule(50, ddim_eta=eta)
+        # DDPM-inversion: Forward
+        eta = 1.0  #0.9968
+        sampler.make_schedule(step, ddim_eta=eta)
         with torch.no_grad():
-            # try not getting wts and just get wt
-            wt, zs, wts = inversion_forward_process(
+            _, zs, wts = inversion_forward_process(
                 model,
                 x0=x0,
                 etas=eta,
-                prompt=ip_embed,
-                cfg_scale=scale,
+                prompt=prompt_src,
+                cfg_scale=cfg_src,
                 prog_bar=True,
                 num_inference_steps=step,
                 timesteps=sampler.ddim_timesteps[::-1],
@@ -235,39 +231,27 @@ def i2i_new(model,
                 c_=c_,
                 uc_=uc_,
             )
-        #from IPython import embed; embed(); exit()
-        #latent_to_image(model, wts, steps=5, sampler=sampler)
 
-        # replace wt[4] with ip_img
+        # Visualisation:
+        #visualize_noising_trajectory(
+        #    model, wts, num_views=5, num_steps=step).save(
+        #        "./diffusion_out/debug/debug_noising_trajectory.png")
+
         wt = wts[-1]
-        #wt = torch.cat((wts[-1, :4, :, :, :], ip_img), dim=0)
-        zs[:, 4, :, :, :] *= 0.0
-        #torch_array = model.decode_first_stage(wts[-1])
-        #img = (torch_array[1].clamp(0, 1) * 255).byte()
-        #img = img.permute(1, 2, 0).cpu().numpy()
-        #Image.fromarray(img).show()
-        with torch.no_grad():
-            xt, _, img = inversion_reverse_process(model,
-                                                xT=wt,
-                                                etas=eta,
-                                                c_=c_,
-                                                uc_=uc_,
-                                                cfg_scales=[scale],
-                                                zs=zs,
-                                                sampler=sampler)
 
-        #xt, _ = sampler.sample_ddpm(
-        #    S=step,
-        #    conditioning=c_,
-        #    batch_size=batch_size,
-        #    shape=shape,
-        #    verbose=False,
-        #    unconditional_guidance_scale=scale,
-        #    unconditional_conditioning=uc_,
-        #    eta=eta,
-        #    x_T=wt,
-        #    zs=zs,
-        #)
+        with torch.no_grad():
+            controller = AttentionStore()
+            register_attention_control(model, controller)
+            xt, _, _ = inversion_reverse_process(model,
+                                                 xT=wts[step - skip],
+                                                 etas=eta,
+                                                 c_=c_,
+                                                 uc_=uc_,
+                                                 cfg_scales=[cfg_tar],
+                                                 zs=zs[:(step - skip)],
+                                                 sampler=sampler,
+                                                 controller=None)
+
         x_sample = model.decode_first_stage(xt)
         x_sample = torch.clamp((x_sample + 1.0) / 2.0, min=0.0, max=1.0)
         x_sample = 255.0 * x_sample.permute(0, 2, 3, 1).cpu().numpy()
@@ -413,8 +397,12 @@ class ImageDreamDiffusion():
                           self.uc,
                           self.sampler,
                           ip=ip,
-                          step=50,
-                          scale=5.0,
+                          step=100,
+                          skip=10,
+                          cfg_src=5.0,
+                          cfg_tar=6.0,
+                          xa=0.6,
+                          sa=0.2,
                           batch_size=self.batch_size,
                           ddim_eta=0.0,
                           dtype=self.dtype,
@@ -423,6 +411,22 @@ class ImageDreamDiffusion():
                           num_frames=args.num_frames,
                           pixel_control=(args.mode == "pixel"),
                           transform=self.image_transform)
+            """img = i2i(self.model,
+                      self.args.size,
+                      t,
+                      self.uc,
+                      self.sampler,
+                      ip=ip,
+                      step=50,
+                      scale=5.0,
+                      batch_size=self.batch_size,
+                      ddim_eta=0.0,
+                      dtype=self.dtype,
+                      device=self.device,
+                      camera=self.camera,
+                      num_frames=args.num_frames,
+                      pixel_control=(args.mode == "pixel"),
+                      transform=self.image_transform)"""
             img = np.concatenate(img[:4], 1)
             images.append(img)
         return images
@@ -481,9 +485,9 @@ if __name__ == "__main__":
     image_dream.model.to(torch.float32)
     #image_dream.model.first_stage_model.to(torch.float32)
 
-    images = image_dream.diffuse(t, ip, n_test=3)
+    images = image_dream.diffuse(t, ip, n_test=1)
 
     name = os.path.basename(args.image).split(".")[0]
     images = np.concatenate(images, 0)
-    Image.fromarray(images).save(f"{name}_{args.mode}_dream.png")
-    print(f"saved image: {name}_{args.mode}_dream.png")
+    Image.fromarray(images).save(f"diffusion_out/{name}_{args.mode}_dream.png")
+    print(f"saved image under diffusion_out as: {name}_{args.mode}_dream.png")
