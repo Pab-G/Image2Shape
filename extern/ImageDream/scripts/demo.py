@@ -114,7 +114,7 @@ def load_and_stack_views(paths, device="cuda"):
 
     tensors = []
     for p in paths:
-        img = Image.open(p)
+        img = Image.open(p).convert("RGBA")
         img = add_random_background(img)
         tensors.append(transform(img))
 
@@ -159,9 +159,18 @@ def i2i_new(model,
         num_frames (int, optional): _description_. Defaults to 4
         pixel_control: whether to use pixel conditioning. Defaults to False.
     """
+    #----------------------------------------------------------------------
+    # Original prompts:
 
-    # Original prompt
-    prompt_src = ['a cow, 3d asset']
+    # spot
+    #prompt_src = ['a cow, 3d asset']
+
+    # knight
+    #prompt_src = ['a knight, 3d asset']
+
+    # tmnt
+    prompt_src = ['teenage mutant ninja turtle, 3d asset']
+    #----------------------------------------------------------------------
     prompt_src = model.get_learned_conditioning(prompt_src).to(device).repeat(
         batch_size, 1, 1)
 
@@ -193,12 +202,31 @@ def i2i_new(model,
             uc_["ip_img"] = torch.zeros_like(ip_img)
 
         shape = [4, image_size // 8, image_size // 8]
+        #----------------------------------------------------------------------
+        # Load assets for other views:
+
+        # spot:
+        #torch_array = load_and_stack_views([
+        #    "./assets/spot/spot_left.png", "./assets/spot/spot_right.png",
+        #    "./assets/spot/spot_back.png"
+        #],
+        #                                   device=device)
+
+        # knight:
+        #torch_array = load_and_stack_views([
+        #    "./assets/knight/knight_right_view.png", "./assets/knight/knight_left_view.png",
+        #    "./assets/knight/knight_back_view.png"
+        #],
+        #                                   device=device)
+
+        #tmnt:
         torch_array = load_and_stack_views([
-            "./assets/spot/spot_left.png", "./assets/spot/spot_right.png",
-            "./assets/spot/spot_back.png"
+            "./assets/tmnt/tmnt_right_view.png",
+            "./assets/tmnt/tmnt_left_view.png",
+            "./assets/tmnt/tmnt_back_view.png"
         ],
                                            device=device)
-
+        #----------------------------------------------------------------------
         # Visualisation:
         #save_tensor_views(torch_array,
         #                  save_path="./diffusion_out/debug/check_input_views.png",
@@ -390,19 +418,42 @@ class ImageDreamDiffusion():
 
     def diffuse(self, t, ip, n_test=3):
         images = []
-        for _ in range(n_test):
-            img = i2i_new(self.model,
+        if self.args.method == "Inversion":
+            print("USING INVERSION METHOD")
+            for _ in range(n_test):
+                img = i2i_new(self.model,
+                              self.args.size,
+                              t,
+                              self.uc,
+                              self.sampler,
+                              ip=ip,
+                              step=100,
+                              skip=25,
+                              cfg_src=5.0,
+                              cfg_tar=6.0,
+                              xa=0.6,
+                              sa=0.2,
+                              batch_size=self.batch_size,
+                              ddim_eta=0.0,
+                              dtype=self.dtype,
+                              device=self.device,
+                              camera=self.camera,
+                              num_frames=args.num_frames,
+                              pixel_control=(args.mode == "pixel"),
+                              transform=self.image_transform)
+                img = np.concatenate(img[:4], 1)
+                images.append(img)
+        elif self.args.method == "ImageDream":
+            print("INFO: USING IMAGEDREAM METHOD")
+            for _ in range(n_test):
+                img = i2i(self.model,
                           self.args.size,
                           t,
                           self.uc,
                           self.sampler,
                           ip=ip,
-                          step=100,
-                          skip=10,
-                          cfg_src=5.0,
-                          cfg_tar=6.0,
-                          xa=0.6,
-                          sa=0.2,
+                          step=50,
+                          scale=5.0,
                           batch_size=self.batch_size,
                           ddim_eta=0.0,
                           dtype=self.dtype,
@@ -411,24 +462,12 @@ class ImageDreamDiffusion():
                           num_frames=args.num_frames,
                           pixel_control=(args.mode == "pixel"),
                           transform=self.image_transform)
-            """img = i2i(self.model,
-                      self.args.size,
-                      t,
-                      self.uc,
-                      self.sampler,
-                      ip=ip,
-                      step=50,
-                      scale=5.0,
-                      batch_size=self.batch_size,
-                      ddim_eta=0.0,
-                      dtype=self.dtype,
-                      device=self.device,
-                      camera=self.camera,
-                      num_frames=args.num_frames,
-                      pixel_control=(args.mode == "pixel"),
-                      transform=self.image_transform)"""
-            img = np.concatenate(img[:4], 1)
-            images.append(img)
+                img = np.concatenate(img[:4], 1)
+                images.append(img)
+        else:
+            raise NotImplementedError(
+                f"method <<{self.args.method}>> not implemented! \n please choose from [ImageDream, Inversion]"
+            )
         return images
 
 
@@ -473,21 +512,28 @@ if __name__ == "__main__":
                         type=str,
                         default="pixel",
                         help="ip mode default pixel")
+    parser.add_argument("--method",
+                        type=str,
+                        default="ImageDream",
+                        help="which method to use: ImageDream or Inversion")
     args = parser.parse_args()
 
     t = args.text + args.suffix
     assert args.num_frames in [4, 5], "num_frames should be in [4, 5]"
     assert os.path.exists(args.image), "image does not exist!"
-    ip = Image.open(args.image)
+    ip = Image.open(args.image).convert("RGBA")
     ip = add_random_background(ip)
 
     image_dream = ImageDreamDiffusion(args)
     image_dream.model.to(torch.float32)
     #image_dream.model.first_stage_model.to(torch.float32)
 
-    images = image_dream.diffuse(t, ip, n_test=1)
+    images = image_dream.diffuse(t, ip, n_test=3)
 
     name = os.path.basename(args.image).split(".")[0]
     images = np.concatenate(images, 0)
-    Image.fromarray(images).save(f"diffusion_out/{name}_{args.mode}_dream.png")
-    print(f"saved image under diffusion_out as: {name}_{args.mode}_dream.png")
+    #Image.fromarray(images).save(
+    #    f"diffusion_out/{args.method}/{name}_{args.mode}_dream.png")
+    #print(f"saved image under diffusion_out as: {name}_{args.mode}_dream.png")
+    Image.fromarray(images).save(f"{name}_{args.mode}_dream_inversion.png")
+    print(f"saved image: {name}_{args.mode}_dream_inversion.png")
