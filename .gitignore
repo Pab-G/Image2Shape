@@ -187,3 +187,6 @@ outputs-gradio/
 
 # wandb
 wandb/
+
+# output
+extern/ImageDream/diffusion_out/
