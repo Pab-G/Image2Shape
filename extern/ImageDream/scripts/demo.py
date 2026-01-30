@@ -166,10 +166,16 @@ def i2i_new(model,
     #prompt_src = ['a cow, 3d asset']
 
     # knight
-    #prompt_src = ['a knight, 3d asset']
+    #prompt_src = ['a knight with a sword, 3d asset']
 
     # tmnt
-    prompt_src = ['teenage mutant ninja turtle, 3d asset']
+    #prompt_src = ['teenage mutant ninja turtle, 3d asset'] 
+    
+    #giraffe: 
+    #prompt_src = ['a giraffe, 3d asset']
+    
+    #humanoid:
+    prompt_src = ['a human, 3d asset']
     #----------------------------------------------------------------------
     prompt_src = model.get_learned_conditioning(prompt_src).to(device).repeat(
         batch_size, 1, 1)
@@ -220,12 +226,29 @@ def i2i_new(model,
         #                                   device=device)
 
         #tmnt:
+        #torch_array = load_and_stack_views([
+        #    "./assets/tmnt/tmnt_right_view.png",
+        #    "./assets/tmnt/tmnt_left_view.png",
+        #    "./assets/tmnt/tmnt_back_view.png"
+        #],
+        #                                   device=device)
+        
+        # giraffe:
+        #torch_array = load_and_stack_views([
+        #    "./assets/giraffe/right.png",
+        #    "./assets/giraffe/left.png",
+        #    "./assets/giraffe/back.png"
+        #],
+        #                                   device=device)
+        
+        #humanoid: 
         torch_array = load_and_stack_views([
-            "./assets/tmnt/tmnt_right_view.png",
-            "./assets/tmnt/tmnt_left_view.png",
-            "./assets/tmnt/tmnt_back_view.png"
+            "./assets/humanoid/right.png",
+            "./assets/humanoid/left.png",
+            "./assets/humanoid/back.png"      
         ],
-                                           device=device)
+                                             device=device)
+        
         #----------------------------------------------------------------------
         # Visualisation:
         #save_tensor_views(torch_array,
@@ -236,13 +259,24 @@ def i2i_new(model,
             (model.encode_first_stage(torch_array.to(device))))
 
         # Tricky because views might need to be arranged for now try out:
+        #TMNT:
+        #x0 = torch.cat((encode_array[0].unsqueeze(0), ip_img,
+        #                encode_array[1].unsqueeze(0),
+        #                encode_array[2].unsqueeze(0), ip_img),
+        #   
+        # dim=0)
+        #x0 = torch.cat((encode_array[1].unsqueeze(0), ip_img,
+        #                encode_array[0].unsqueeze(0),
+        #                encode_array[2].unsqueeze(0), ip_img),
+        #               dim=0)
+        #Giraffe:
         x0 = torch.cat((encode_array[1].unsqueeze(0), ip_img,
                         encode_array[0].unsqueeze(0),
                         encode_array[2].unsqueeze(0), ip_img),
                        dim=0)
-
+        
         # DDPM-inversion: Forward
-        eta = 1.0  #0.9968
+        eta = 0.5  #TMNT: 1.0
         sampler.make_schedule(step, ddim_eta=eta)
         with torch.no_grad():
             _, zs, wts = inversion_forward_process(
@@ -268,9 +302,9 @@ def i2i_new(model,
         wt = wts[-1]
 
         with torch.no_grad():
-            controller = AttentionStore()
-            register_attention_control(model, controller)
-            xt, _, _ = inversion_reverse_process(model,
+            #controller = AttentionStore()
+            #register_attention_control(model, controller)
+            xt, _, imgs = inversion_reverse_process(model,
                                                  xT=wts[step - skip],
                                                  etas=eta,
                                                  c_=c_,
@@ -279,7 +313,8 @@ def i2i_new(model,
                                                  zs=zs[:(step - skip)],
                                                  sampler=sampler,
                                                  controller=None)
-
+            #x = visualize_noising_trajectory(model, imgs, num_views=5, num_steps=step - skip - 1)
+            #x.save(f"output.png")
         x_sample = model.decode_first_stage(xt)
         x_sample = torch.clamp((x_sample + 1.0) / 2.0, min=0.0, max=1.0)
         x_sample = 255.0 * x_sample.permute(0, 2, 3, 1).cpu().numpy()
@@ -427,10 +462,10 @@ class ImageDreamDiffusion():
                               self.uc,
                               self.sampler,
                               ip=ip,
-                              step=100,
-                              skip=25,
-                              cfg_src=5.0,
-                              cfg_tar=6.0,
+                              step=100, #spot: 100, #TMNT: 100
+                              skip=18, #spot: 13, #TMNT: 36
+                              cfg_src=1.0, #spot: 1.0, # TMNT: 1.0
+                              cfg_tar=2.0, #spot: 3.5, #TMNT: 1.9
                               xa=0.6,
                               sa=0.2,
                               batch_size=self.batch_size,
@@ -452,7 +487,7 @@ class ImageDreamDiffusion():
                           self.uc,
                           self.sampler,
                           ip=ip,
-                          step=50,
+                          step=100,
                           scale=5.0,
                           batch_size=self.batch_size,
                           ddim_eta=0.0,
@@ -528,12 +563,12 @@ if __name__ == "__main__":
     image_dream.model.to(torch.float32)
     #image_dream.model.first_stage_model.to(torch.float32)
 
-    images = image_dream.diffuse(t, ip, n_test=3)
+    images = image_dream.diffuse(t, ip, n_test=1)
 
     name = os.path.basename(args.image).split(".")[0]
     images = np.concatenate(images, 0)
     #Image.fromarray(images).save(
     #    f"diffusion_out/{args.method}/{name}_{args.mode}_dream.png")
     #print(f"saved image under diffusion_out as: {name}_{args.mode}_dream.png")
-    Image.fromarray(images).save(f"{name}_{args.mode}_dream_inversion.png")
-    print(f"saved image: {name}_{args.mode}_dream_inversion.png")
+    Image.fromarray(images).save(f"{args.method}_{name}.png")
+    print(f"saved image: {args.method}_{name}.png")
