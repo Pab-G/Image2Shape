@@ -161,7 +161,7 @@ def load_eval_data(in_dir, input_img_res=512, radius=1.0):
 @click.option("--render_nerf_res", type=int, default=1024, help="resolution of NeRF renering")
 def main(**kwargs):
     opt = EasyDict(kwargs)
-    config = "configs/config_texrefine.yaml"
+    config = "../models/snap_gtr/configs/config_texrefine.yaml"
     job_num = 0
     ckpt_path = opt.ckpt_path
     out_dir = opt.out_dir

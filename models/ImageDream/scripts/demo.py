@@ -139,19 +139,14 @@ def i2i_new(model,
     # Original prompts:
 
     # spot
-    prompt_src = ['a cow, 3d asset']
+    #prompt_src = ['a cow, 3d asset']
 
     # knight
     #prompt_src = ['a knight with a sword, 3d asset']
 
     # tmnt
-    #prompt_src = ['teenage mutant ninja turtle, 3d asset'] 
+    prompt_src = ['teenage mutant ninja turtle, 3d asset'] 
     
-    #giraffe: 
-    #prompt_src = ['a giraffe, 3d asset']
-    
-    #humanoid:
-    #prompt_src = ['a human, 3d asset']
     #----------------------------------------------------------------------
     prompt_src = model.get_learned_conditioning(prompt_src).to(device).repeat(
         batch_size, 1, 1)
@@ -188,11 +183,11 @@ def i2i_new(model,
         # Load assets for other views:
 
         # spot:
-        torch_array = load_and_stack_views([
-            "../demo/assets/spot/left.png", "../demo/assets/spot/right.png",
-            "../demo/assets/spot/back.png"
-        ],
-                                           device=device)
+        #torch_array = load_and_stack_views([
+        #    "../demo/assets/spot/left.png", "../demo/assets/spot/right.png",
+        #    "../demo/assets/spot/back.png"
+        #],
+        #                                   device=device)
 
         # knight:
         #torch_array = load_and_stack_views([
@@ -202,29 +197,12 @@ def i2i_new(model,
         #                                   device=device)
 
         #tmnt:
-        #torch_array = load_and_stack_views([
-        #    "./assets/tmnt/tmnt_right_view.png",
-        #    "./assets/tmnt/tmnt_left_view.png",
-        #    "./assets/tmnt/tmnt_back_view.png"
-        #],
-        #                                   device=device)
-        
-        # giraffe:
-        #torch_array = load_and_stack_views([
-        #    "./assets/giraffe/right.png",
-        #    "./assets/giraffe/left.png",
-        #    "./assets/giraffe/back.png"
-        #],
-        #                                   device=device)
-        
-        #humanoid: 
-        #torch_array = load_and_stack_views([
-        #    "./assets/humanoid/right.png",
-        #    "./assets/humanoid/left.png",
-        #    "./assets/humanoid/back.png"      
-        #],
-        #                                     device=device)
-        
+        torch_array = load_and_stack_views([
+            "../demo/assets/tmnt/left.png",
+            "../demo/assets/tmnt/right.png",
+            "../demo/assets/tmnt/back.png"
+        ],
+                                           device=device)
         #----------------------------------------------------------------------
 
         encode_array = model.get_first_stage_encoding(
@@ -232,19 +210,18 @@ def i2i_new(model,
 
         # Tricky because views might need to be arranged for now try out:
         #TMNT:
-        #x0 = torch.cat((encode_array[0].unsqueeze(0), ip_img,
-        #                encode_array[1].unsqueeze(0),
+        #x0 = torch.cat((encode_array[1].unsqueeze(0), ip_img,
+        #                encode_array[0].unsqueeze(0),
         #                encode_array[2].unsqueeze(0), ip_img),
-        #   
-        # dim=0)
-        
-        x0 = torch.cat((encode_array[1].unsqueeze(0), ip_img,
-                        encode_array[0].unsqueeze(0),
-                        encode_array[2].unsqueeze(0), ip_img),
+        #               dim=0)
+        x0 = torch.cat((encode_array[0].unsqueeze(0), ip_embed,
+                        encode_array[1].unsqueeze(0),
+                        encode_array[2].unsqueeze(0), ip_embed),
                        dim=0)
+        
 
         # DDPM-inversion: Forward
-        eta = 0.1  #TMNT: 1.0
+        eta = 1.0  #TMNT: 1.0
         sampler.make_schedule(step, ddim_eta=eta)
         with torch.no_grad():
             _, zs, wts = inversion_forward_process(
@@ -421,10 +398,10 @@ class ImageDreamDiffusion():
                               self.uc,
                               self.sampler,
                               ip=ip,
-                              step=100, #spot: 100, #TMNT: 100
-                              skip=13, #spot: 13, #TMNT: 36
-                              cfg_src=1.0, #spot: 1.0, # TMNT: 1.0
-                              cfg_tar=3.5, #spot: 3.5, #TMNT: 1.9
+                              step=100, #TMNT: 100
+                              skip=0, #TMNT: 36
+                              cfg_src=1.0, #TMNT: 1.0
+                              cfg_tar=1.0,#TMNT: 1.9
                               xa=0.6,
                               sa=0.2,
                               batch_size=self.batch_size,

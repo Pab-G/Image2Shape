@@ -151,10 +151,10 @@ def main(
 
     # changed for ImageDream
     theta_list = [85, 85, 85, 85] 
-    phi_list = [90, 0, 270, 180] 
+    phi_list = [90, 0, -90, 180] 
     cam_radius = 4
     radius_list = [cam_radius] * len(phi_list)
-    fov = 30
+    fov = 20.0
     width, height = 512, 512
 
     for i in range(len(img_list)):
